@@ -1,5 +1,12 @@
 # Flutter WebRTC Demo
-<img src="screenshots/screenshot_1.png" alt="cloudflare_direct_call_screen"/>
+<img src="screenshots/screenshot_1.png" alt="cloudflare_direct_call_screen" width="700"/> 
+<br>
+<b>User 1's screen</b>
+<br>
+<br>
+<img src="screenshots/screenshot_2.png" alt="cloudflare_direct_call_screen" width="400"/>
+<br>
+<b>User 2's screen</b>
 
 <br>
 
