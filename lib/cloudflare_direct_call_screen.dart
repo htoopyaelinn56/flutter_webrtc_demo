@@ -1,3 +1,5 @@
+import 'dart:developer' show log;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -43,10 +45,28 @@ class _CloudflareDirectCallScreenState
   /// PHASE A: CREATE THE CALL & BROADCAST YOUR TRACk
   Future<void> _startBroadcasting() async {
     try {
-      // 1. Open local camera and microphone
+      // Check available media devices
+      final devices = await navigator.mediaDevices.enumerateDevices();
+      bool hasVideo = false;
+      bool hasAudio = false;
+      for (var device in devices) {
+        if (device.kind == 'videoinput') {
+          hasVideo = true;
+        } else if (device.kind == 'audioinput') {
+          hasAudio = true;
+        }
+      }
+
+      if (!hasVideo && !hasAudio) {
+        throw Exception(
+          "NotFoundError: No audio or video input devices found.",
+        );
+      }
+
+      // 1. Open local camera and microphone dynamically
       _localStream = await navigator.mediaDevices.getUserMedia({
-        'audio': true,
-        'video': {'facingMode': 'user'},
+        'audio': hasAudio,
+        'video': hasVideo ? {'facingMode': 'user'} : false,
       });
       _localRenderer.srcObject = _localStream;
 
@@ -90,11 +110,30 @@ class _CloudflareDirectCallScreenState
       RTCSessionDescription trackOffer = await _peerConnection!.createOffer();
       await _peerConnection!.setLocalDescription(trackOffer);
 
+      // Extract transceivers to build local tracks specification for Cloudflare
+      final transceivers = await _peerConnection!.getTransceivers();
+      List<Map<String, dynamic>> tracksToPush = [];
+      for (var transceiver in transceivers) {
+        final track = transceiver.sender.track;
+        if (track != null) {
+          tracksToPush.add({
+            "location": "local",
+            "mid": transceiver.mid,
+            "trackName": track.id ?? '',
+          });
+        }
+      }
+
+      if (tracksToPush.isEmpty) {
+        throw Exception("No tracks are available to publish.");
+      }
+
       final trackResult = await _cfService.pushTrack(
         sessionId,
         trackOffer.sdp!,
+        tracksToPush,
       );
-      String trackId = trackResult['trackId'];
+      List<String> trackIds = List<String>.from(trackResult['trackIds']);
       String trackAnswerSdp = trackResult['sdp'];
 
       // Apply the track push answer
@@ -104,17 +143,26 @@ class _CloudflareDirectCallScreenState
 
       setState(() {
         _mySessionId = sessionId;
-        _myTrackId = trackId;
+        _myTrackId = '$sessionId#${trackIds.join(':')}';
       });
-    } catch (e) {
-      _showErrorDialog("Broadcast Error: $e");
+    } catch (e, st) {
+      log('$e\n$st');
+      String errMsg = e.toString();
+      if (errMsg.contains('NotFoundError') ||
+          errMsg.contains('devices not found')) {
+        errMsg =
+            "Camera or microphone not found on this device.\n\n"
+            "If you are using an iOS/Android Simulator, please note that physical camera hardware is not simulated. "
+            "Please test on a physical device, or ensure hardware/permissions are properly configured.";
+      }
+      _showErrorDialog("Broadcast Error: $errMsg");
     }
   }
 
   /// PHASE B: PULL CO-CALLER'S STREAM USING THEIR KEY
   Future<void> _connectToRemoteUser() async {
-    final remoteTrackId = _remoteTrackController.text.trim();
-    if (remoteTrackId.isEmpty || _mySessionId == "Not Created") {
+    final remoteTrackIdInput = _remoteTrackController.text.trim();
+    if (remoteTrackIdInput.isEmpty || _mySessionId == "Not Created") {
       _showErrorDialog(
         "Please start your broadcast and provide a valid target Key first.",
       );
@@ -122,10 +170,28 @@ class _CloudflareDirectCallScreenState
     }
 
     try {
-      // 1. Tell Cloudflare we want to subscribe to this remote Track ID
-      final pullResult = await _cfService.pullTrack(
+      final parts = remoteTrackIdInput.split('#');
+      if (parts.length != 2) {
+        _showErrorDialog("Invalid Key format. Make sure you copied the entire key.");
+        return;
+      }
+      final publisherSessionId = parts[0];
+      final trackIdsString = parts[1];
+
+      List<String> remoteTrackIds = trackIdsString
+          .split(':')
+          .where((id) => id.isNotEmpty)
+          .toList();
+      if (remoteTrackIds.isEmpty) {
+        _showErrorDialog("Invalid Key format. No tracks found in key.");
+        return;
+      }
+
+      // 1. Tell Cloudflare we want to subscribe to these remote Track IDs
+      final pullResult = await _cfService.pullTracks(
         _mySessionId,
-        remoteTrackId,
+        publisherSessionId,
+        remoteTrackIds,
       );
       String cloudflareOfferSdp = pullResult['sdp'];
 
@@ -140,7 +206,8 @@ class _CloudflareDirectCallScreenState
 
       // 4. Send our local answer back to conclude the negotiation
       await _cfService.renegotiateSession(_mySessionId, localAnswer.sdp!);
-    } catch (e) {
+    } catch (e, st) {
+      log('$e\n$st');
       _showErrorDialog("Connection Error: $e");
     }
   }
@@ -251,12 +318,14 @@ class _CloudflareDirectCallScreenState
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          SelectableText(
-                            _myTrackId,
-                            style: const TextStyle(
-                              color: Colors.blue,
-                              fontFamily: 'monospace',
-                              fontSize: 13,
+                          Expanded(
+                            child: SelectableText(
+                              _myTrackId,
+                              style: const TextStyle(
+                                color: Colors.blue,
+                                fontFamily: 'monospace',
+                                fontSize: 13,
+                              ),
                             ),
                           ),
                           IconButton(
